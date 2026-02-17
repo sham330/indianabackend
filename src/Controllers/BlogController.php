@@ -567,4 +567,64 @@ public function getBlogBySlug(): void
         $slug = trim($slug, '-');
         return substr($slug, 0, 255);
     }
+
+    /**
+     * Handle image upload and save to uploads/ folder
+     */
+    private function handleImageUpload(array $file): ?string
+    {
+        // 1️⃣ Create uploads directory if not exists
+        $uploadDir = __DIR__ . '/../../uploads/';
+        if (!is_dir($uploadDir)) {
+            mkdir($uploadDir, 0755, true);
+        }
+
+        // 2️⃣ Validate file upload
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            error_log("Upload error: " . $file['error']);
+            return null;
+        }
+
+        // 3️⃣ Validate file size (max 5MB)
+        if ($file['size'] > 5 * 1024 * 1024) {
+            error_log("File too large: " . $file['size']);
+            return null;
+        }
+
+        // 4️⃣ Validate image types
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mimeType = finfo_file($finfo, $file['tmp_name']);
+        finfo_close($finfo);
+        
+        $allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+        if (!in_array($mimeType, $allowedTypes)) {
+            error_log("Invalid file type: {$mimeType}");
+            return null;
+        }
+
+        // 5️⃣ Generate unique filename
+        $fileExtension = pathinfo($file['name'], PATHINFO_EXTENSION);
+        $newFilename = $this->generateUuid() . '.' . $fileExtension;
+
+        // 6️⃣ Move file to uploads folder
+        $targetPath = $uploadDir . $newFilename;
+        if (move_uploaded_file($file['tmp_name'], $targetPath)) {
+            error_log("Image uploaded: {$newFilename}");
+            return $newFilename;
+        }
+
+        error_log("Failed to move uploaded file");
+        return null;
+    }
+
+    /**
+     * Generate UUID v4
+     */
+    private function generateUuid(): string
+    {
+        $data = random_bytes(16);
+        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
+        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+    }
 }

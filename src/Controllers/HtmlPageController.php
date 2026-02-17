@@ -606,7 +606,7 @@ class HtmlPageController
                 'success' => true,
                 'message' => 'Image uploaded successfully',
                 'image_path' => $imagePath,
-                'image_url' => "/uploads/{$imagePath}"
+                'image_url' => "{$imagePath}"
             ]);
 
         } catch (Exception $e) {
