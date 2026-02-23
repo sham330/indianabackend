@@ -5,7 +5,6 @@ namespace src\Controllers;
 
 use src\Core\Database;
 use PDO;
-use InvalidArgumentException;
 use RuntimeException;
 use Exception;
 
@@ -23,13 +22,18 @@ class HtmlPageController
         );
     }
 
-    /**
-     * Create HTML page (without html_content initially - status: draft)
-     */
+    private function isAdmin(): bool
+    {
+        return ($_SERVER['AUTH_USER']['role'] ?? '') === 'admin';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CREATE PAGE
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function createPage(): void
     {
         try {
-            // 1️⃣ Check authentication
             if (!isset($_SERVER['AUTH_USER'])) {
                 http_response_code(401);
                 echo json_encode(['message' => 'Authentication required']);
@@ -37,87 +41,70 @@ class HtmlPageController
             }
 
             $userId = $_SERVER['AUTH_USER']['id'];
-            $db = Database::connect();
+            $db     = Database::connect();
 
-            // 2️⃣ Validate required fields (removed html_content)
-            $required = ['slug'];
-            foreach ($required as $field) {
-                if (empty($_POST[$field] ?? '')) {
-                    http_response_code(422);
-                    echo json_encode(['message' => "Missing required field: {$field}"]);
-                    return;
-                }
+            if (empty($_POST['slug'] ?? '')) {
+                http_response_code(422);
+                echo json_encode(['message' => 'Missing required field: slug']);
+                return;
             }
 
-            $slug = trim($_POST['slug']);
-            $seoTitle = trim($_POST['seo_title'] ?? '');
+            $slug           = trim($_POST['slug']);
+            $type           = trim($_POST['type'] ?? null); // NEW: type field
+            $seoTitle       = trim($_POST['seo_title'] ?? '');
             $seoDescription = trim($_POST['seo_description'] ?? '');
 
-            // 3️⃣ Check ad limit using ONLY USER_ID
-            $vendorStmt = $db->prepare("
-                SELECT no_of_ads 
-                FROM vendors 
-                WHERE user_id = :user_id
-                LIMIT 1
-            ");
-            $vendorStmt->execute(['user_id' => $userId]);
-            $vendor = $vendorStmt->fetch();
-
-            if ($vendor) {
-                $vendorAdLimit = (int)$vendor['no_of_ads'];
-
-                $pageCountStmt = $db->prepare("
-                    SELECT COUNT(*) as page_count 
-                    FROM html_pages 
-                    WHERE user_id = :user_id
+            // Check ad limit (skip for admin)
+            if (!$this->isAdmin()) {
+                $vendorStmt = $db->prepare("
+                    SELECT no_of_ads FROM vendors WHERE user_id = :user_id LIMIT 1
                 ");
-                $pageCountStmt->execute(['user_id' => $userId]);
-                $pageCount = (int)$pageCountStmt->fetch()['page_count'];
+                $vendorStmt->execute(['user_id' => $userId]);
+                $vendor = $vendorStmt->fetch();
 
-                if ($pageCount >= $vendorAdLimit) {
-                    http_response_code(403);
-                    echo json_encode([
-                        'message' => 'Ad limit exceeded',
-                        'current_pages' => $pageCount,
-                        'max_allowed' => $vendorAdLimit,
-                        'user_id' => $userId
-                    ]);
-                    return;
+                if ($vendor) {
+                    $vendorAdLimit = (int)$vendor['no_of_ads'];
+
+                    $pageCountStmt = $db->prepare("
+                        SELECT COUNT(*) as page_count FROM html_pages WHERE user_id = :user_id
+                    ");
+                    $pageCountStmt->execute(['user_id' => $userId]);
+                    $pageCount = (int)$pageCountStmt->fetch()['page_count'];
+
+                    if ($pageCount >= $vendorAdLimit) {
+                        http_response_code(403);
+                        echo json_encode([
+                            'message'       => 'Ad limit exceeded',
+                            'current_pages' => $pageCount,
+                            'max_allowed'   => $vendorAdLimit,
+                        ]);
+                        return;
+                    }
                 }
             }
 
-            // 4️⃣ Generate unique slug
             $finalSlug = $this->generateUniqueSlug($db, $slug);
 
-            // 5️⃣ Prepare page data (html_content will be NULL initially)
             $pageData = [
-                'id' => $this->generateUuid(),
-                'user_id' => $userId,
-                'vendor_id' => null,
-                'slug' => $finalSlug,
-                'html_content' => null, // Will be added later via uploadContent
-                'seo_title' => $seoTitle,
+                'id'              => $this->generateUuid(),
+                'user_id'         => $userId,
+                'vendor_id'       => null,
+                'slug'            => $finalSlug,
+                'type'            => $type, // NEW: include type
+                'html_content'    => null,
+                'seo_title'       => $seoTitle,
                 'seo_description' => $seoDescription,
             ];
 
-            // 6️⃣ Insert page (status = 'draft' by default)
             $db->beginTransaction();
             try {
                 $stmt = $db->prepare("
-                    INSERT INTO html_pages (
-                        id, user_id, vendor_id, slug, 
-                        html_content, seo_title, seo_description
-                    ) VALUES (
-                        :id, :user_id, :vendor_id, :slug,
-                        :html_content, :seo_title, :seo_description
-                    )
+                    INSERT INTO html_pages (id, user_id, vendor_id, slug, type, html_content, seo_title, seo_description)
+                    VALUES (:id, :user_id, :vendor_id, :slug, :type, :html_content, :seo_title, :seo_description)
                 ");
-
-                $result = $stmt->execute($pageData);
-                if (!$result) {
+                if (!$stmt->execute($pageData)) {
                     throw new RuntimeException('Failed to create page');
                 }
-
                 $db->commit();
             } catch (Exception $e) {
                 $db->rollBack();
@@ -126,43 +113,45 @@ class HtmlPageController
 
             http_response_code(201);
             echo json_encode([
-                'success' => true,
-                'message' => 'HTML page created successfully (content pending)',
-                'page_id' => $pageData['id'],
-                'slug' => $pageData['slug'],
-                'status' => 'draft',
-                'page_url' => "/pages/{$pageData['slug']}"
+                'success'  => true,
+                'message'  => 'HTML page created successfully (content pending)',
+                'page_id'  => $pageData['id'],
+                'slug'     => $pageData['slug'],
+                'type'     => $pageData['type'], // NEW: return type
+                'status'   => 'draft',
+                'page_url' => "/pages/{$pageData['slug']}",
             ]);
 
-        } catch (RuntimeException $e) {
-            http_response_code(500);
-            error_log("Create page error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("Unexpected page creation error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
         }
     }
 
-    /**
-     * Upload HTML content and screenshot image to existing page
-     */
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UPLOAD CONTENT  (admin bypasses ownership check)
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function uploadContent(): void
     {
         try {
-            // 1️⃣ Check authentication
             if (!isset($_SERVER['AUTH_USER'])) {
                 http_response_code(401);
                 echo json_encode(['message' => 'Authentication required']);
                 return;
             }
 
-            $userId = $_SERVER['AUTH_USER']['id'];
-
-            // 2️⃣ Validate required fields
-            $pageId = trim($_POST['page_id'] ?? '');
+            $userId      = $_SERVER['AUTH_USER']['id'];
+            $isAdmin     = $this->isAdmin();
+            $pageId      = trim($_POST['page_id'] ?? '');
             $htmlContent = trim($_POST['html_content'] ?? '');
+            $craftState  = $_POST['craft_state'] ?? null;
 
             if (empty($pageId) || empty($htmlContent)) {
                 http_response_code(422);
@@ -170,7 +159,6 @@ class HtmlPageController
                 return;
             }
 
-            // 3️⃣ Handle screenshot image upload (optional)
             $screenshotPath = null;
             if (isset($_FILES['screenshot_image']) && $_FILES['screenshot_image']['error'] !== UPLOAD_ERR_NO_FILE) {
                 $screenshotPath = $this->handleImageUpload($_FILES['screenshot_image']);
@@ -183,16 +171,16 @@ class HtmlPageController
 
             $db = Database::connect();
 
-            // 4️⃣ Verify page ownership
-            $checkStmt = $db->prepare("
-                SELECT id, status 
-                FROM html_pages 
-                WHERE id = :page_id AND user_id = :user_id
-            ");
-            $checkStmt->execute([
-                'page_id' => $pageId,
-                'user_id' => $userId
-            ]);
+            // Admin can access any page; regular users only their own
+            $checkSql    = $isAdmin
+                ? "SELECT id, status FROM html_pages WHERE id = :page_id"
+                : "SELECT id, status FROM html_pages WHERE id = :page_id AND user_id = :user_id";
+            $checkParams = $isAdmin
+                ? ['page_id' => $pageId]
+                : ['page_id' => $pageId, 'user_id' => $userId];
+
+            $checkStmt = $db->prepare($checkSql);
+            $checkStmt->execute($checkParams);
             $page = $checkStmt->fetch();
 
             if (!$page) {
@@ -201,189 +189,57 @@ class HtmlPageController
                 return;
             }
 
-            // 5️⃣ Update page with HTML content and screenshot
             $db->beginTransaction();
             try {
                 $updateStmt = $db->prepare("
-                    UPDATE html_pages 
-                    SET html_content = :html_content,
-                        screenshot_image = :screenshot_image
+                    UPDATE html_pages
+                    SET html_content     = :html_content,
+                        screenshot_image = :screenshot_image,
+                        craft_state      = :craft_state
                     WHERE id = :page_id
                 ");
-
-                $result = $updateStmt->execute([
-                    'html_content' => $htmlContent,
+                if (!$updateStmt->execute([
+                    'html_content'     => $htmlContent,
                     'screenshot_image' => $screenshotPath,
-                    'page_id' => $pageId
-                ]);
-
-                if (!$result) {
+                    'craft_state'      => $craftState,
+                    'page_id'          => $pageId,
+                ])) {
                     throw new RuntimeException('Failed to update page content');
                 }
-
                 $db->commit();
             } catch (Exception $e) {
                 $db->rollBack();
-                
-                // Clean up uploaded image if database update fails
                 if ($screenshotPath !== null) {
-                    $uploadDir = __DIR__ . '/../../uploads/';
-                    @unlink($uploadDir . $screenshotPath);
+                    @unlink(__DIR__ . '/../../uploads/' . $screenshotPath);
                 }
-                
                 throw $e;
             }
 
             http_response_code(200);
             echo json_encode([
-                'success' => true,
-                'message' => 'HTML content and screenshot uploaded successfully',
-                'page_id' => $pageId,
+                'success'             => true,
+                'message'             => 'HTML content and screenshot uploaded successfully',
+                'page_id'             => $pageId,
                 'screenshot_uploaded' => $screenshotPath !== null,
-                'screenshot_path' => $screenshotPath
+                'screenshot_path'     => $screenshotPath,
             ]);
 
-        } catch (RuntimeException $e) {
-            http_response_code(500);
-            error_log("Upload content error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("Unexpected upload error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
-        }
-    }
-
-    /**
-     * Handle image upload with validation
-     */
-    private function handleImageUpload(array $file): ?string
-    {
-        // 1️⃣ Create uploads directory if not exists
-        $uploadDir = __DIR__ . '/../../uploads/';
-        if (!is_dir($uploadDir)) {
-            mkdir($uploadDir, 0755, true);
-        }
-
-        // 2️⃣ Validate file upload
-        if ($file['error'] !== UPLOAD_ERR_OK) {
-            error_log("Upload error: " . $file['error']);
-            return null;
-        }
-
-        // 3️⃣ Validate file size (max 5MB)
-        if ($file['size'] > 5 * 1024 * 1024) {
-            error_log("File too large: " . $file['size']);
-            return null;
-        }
-
-        // 4️⃣ Validate image types
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mimeType = finfo_file($finfo, $file['tmp_name']);
-        finfo_close($finfo);
-        
-        $allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-        if (!in_array($mimeType, $allowedTypes)) {
-            error_log("Invalid file type: {$mimeType}");
-            return null;
-        }
-
-        // 5️⃣ Generate unique filename
-        $fileExtension = pathinfo($file['name'], PATHINFO_EXTENSION);
-        $newFilename = $this->generateUuid() . '.' . $fileExtension;
-
-        // 6️⃣ Move file to uploads folder
-        $targetPath = $uploadDir . $newFilename;
-        if (move_uploaded_file($file['tmp_name'], $targetPath)) {
-            error_log("Image uploaded: {$newFilename}");
-            return $newFilename;
-        }
-
-        error_log("Failed to move uploaded file");
-        return null;
-    }
-
-    /**
-     * Generate unique slug
-     */
-    private function generateUniqueSlug(PDO $pdo, string $baseSlug): string
-    {
-        // Convert to slug format
-        $slug = preg_replace('/[^a-z0-9]+/', '-', strtolower($baseSlug));
-        $slug = trim($slug, '-');
-
-        if (empty($slug)) {
-            $slug = 'page-' . time();
-        }
-
-        // Check if slug exists
-        $checkStmt = $pdo->prepare("SELECT id FROM html_pages WHERE slug = :slug");
-        $checkStmt->execute(['slug' => $slug]);
-
-        if (!$checkStmt->fetch()) {
-            return $slug;
-        }
-
-        // Generate unique slug with counter
-        $counter = 1;
-        do {
-            $uniqueSlug = $slug . '-' . $counter;
-            $checkStmt->execute(['slug' => $uniqueSlug]);
-            $counter++;
-        } while ($checkStmt->fetch());
-
-        return $uniqueSlug;
-    }
-
-    /**
-     * Get page by slug (public endpoint)
-     */
-    public function getPage(): void
-    {
-        try {
-            $slug = trim($_GET['slug'] ?? '');
-
-            if (empty($slug)) {
-                http_response_code(422);
-                echo json_encode(['message' => 'Slug required']);
-                return;
-            }
-
-            $db = Database::connect();
-
-            $stmt = $db->prepare("
-                SELECT id, user_id, vendor_id, slug, 
-                       html_content, seo_title, seo_description, status,
-                       screenshot_image
-                FROM html_pages 
-                WHERE slug = :slug AND status IN ('published', 'pending')
-            ");
-            $stmt->execute(['slug' => $slug]);
-            $page = $stmt->fetch();
-
-            if (!$page) {
-                http_response_code(404);
-                echo json_encode(['message' => 'Page not found']);
-                return;
-            }
-
-            http_response_code(200);
             echo json_encode([
-                'success' => true,
-                'page' => $page
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
             ]);
-
-        } catch (Exception $e) {
-            http_response_code(500);
-            error_log("Get page error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
         }
     }
 
-    /**
-     * List user's pages (authenticated)
-     */
-    public function listPages(): void
+    // ─────────────────────────────────────────────────────────────────────────
+    // DELETE PAGE  (admin bypasses ownership check)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public function deletePage(): void
     {
         try {
             if (!isset($_SERVER['AUTH_USER'])) {
@@ -392,36 +248,75 @@ class HtmlPageController
                 return;
             }
 
-            $userId = $_SERVER['AUTH_USER']['id'];
+            $userId  = $_SERVER['AUTH_USER']['id'];
+            $isAdmin = $this->isAdmin();
+            $pageId  = trim($_POST['page_id'] ?? '');
+
+            if (empty($pageId)) {
+                http_response_code(422);
+                echo json_encode(['message' => 'Page ID required']);
+                return;
+            }
+
             $db = Database::connect();
 
-            $stmt = $db->prepare("
-                SELECT id, vendor_id, slug, seo_title, status, 
-                       screenshot_image, created_at, updated_at
-                FROM html_pages 
-                WHERE user_id = :user_id 
-                ORDER BY created_at DESC
-            ");
-            $stmt->execute(['user_id' => $userId]);
-            $pages = $stmt->fetchAll();
+            $checkSql    = $isAdmin
+                ? "SELECT id, screenshot_image FROM html_pages WHERE id = :page_id"
+                : "SELECT id, screenshot_image FROM html_pages WHERE id = :page_id AND user_id = :user_id";
+            $checkParams = $isAdmin
+                ? ['page_id' => $pageId]
+                : ['page_id' => $pageId, 'user_id' => $userId];
+
+            $checkStmt = $db->prepare($checkSql);
+            $checkStmt->execute($checkParams);
+            $page = $checkStmt->fetch();
+
+            if (!$page) {
+                http_response_code(404);
+                echo json_encode(['message' => 'Page not found or access denied']);
+                return;
+            }
+
+            $db->beginTransaction();
+            try {
+                $deleteStmt = $db->prepare("DELETE FROM html_pages WHERE id = :page_id");
+                $result     = $deleteStmt->execute(['page_id' => $pageId]);
+
+                if (!$result || $deleteStmt->rowCount() === 0) {
+                    throw new RuntimeException('Failed to delete page');
+                }
+                $db->commit();
+            } catch (Exception $e) {
+                $db->rollBack();
+                throw $e;
+            }
+
+            if (!empty($page['screenshot_image'])) {
+                @unlink(__DIR__ . '/../../uploads/' . $page['screenshot_image']);
+            }
 
             http_response_code(200);
             echo json_encode([
                 'success' => true,
-                'pages' => $pages,
-                'count' => count($pages)
+                'message' => 'Page deleted successfully',
+                'page_id' => $pageId,
             ]);
 
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("List pages error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
         }
     }
 
-    /**
-     * Update page status (admin/vendor only)
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    // UPDATE STATUS  (admin bypasses ownership check)
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function updateStatus(): void
     {
         try {
@@ -431,34 +326,28 @@ class HtmlPageController
                 return;
             }
 
-            $pageId = trim($_POST['page_id'] ?? '');
+            $userId    = $_SERVER['AUTH_USER']['id'];
+            $isAdmin   = $this->isAdmin();
+            $pageId    = trim($_POST['page_id'] ?? '');
             $newStatus = trim($_POST['status'] ?? '');
 
-            if (empty($pageId) || !in_array($newStatus, ['draft', 'pending', 'published', 'blocked'])) {
+            if (empty($pageId) || !in_array($newStatus, ['draft', 'pending', 'published', 'blocked', 'archived'])) {
                 http_response_code(422);
                 echo json_encode(['message' => 'Invalid page_id or status']);
                 return;
             }
 
             $db = Database::connect();
-            
-            // Check ownership or admin role
-            $userRole = $_SERVER['AUTH_USER']['role'] ?? '';
-            $userId = $_SERVER['AUTH_USER']['id'];
 
-            $stmt = $db->prepare("
-                UPDATE html_pages 
-                SET status = :status 
-                WHERE id = :page_id 
-                AND (user_id = :user_id OR :user_role = 'admin')
-            ");
-            
-            $result = $stmt->execute([
-                'status' => $newStatus,
-                'page_id' => $pageId,
-                'user_id' => $userId,
-                'user_role' => $userRole
-            ]);
+            $sql    = $isAdmin
+                ? "UPDATE html_pages SET status = :status WHERE id = :page_id"
+                : "UPDATE html_pages SET status = :status WHERE id = :page_id AND user_id = :user_id";
+            $params = $isAdmin
+                ? ['status' => $newStatus, 'page_id' => $pageId]
+                : ['status' => $newStatus, 'page_id' => $pageId, 'user_id' => $userId];
+
+            $stmt   = $db->prepare($sql);
+            $result = $stmt->execute($params);
 
             if (!$result || $stmt->rowCount() === 0) {
                 http_response_code(404);
@@ -471,34 +360,37 @@ class HtmlPageController
                 'success' => true,
                 'message' => 'Page status updated successfully',
                 'page_id' => $pageId,
-                'status' => $newStatus
+                'status'  => $newStatus,
             ]);
 
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("Update page status error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
         }
     }
 
-    /**
-     * Get page content by ID (authenticated - user must own the page)
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET PAGE CONTENT BY ID  (admin bypasses ownership check)
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function getPageContent(): void
     {
         try {
-            // 1️⃣ Check authentication
             if (!isset($_SERVER['AUTH_USER'])) {
                 http_response_code(401);
                 echo json_encode(['message' => 'Authentication required']);
                 return;
             }
 
-            $userId = $_SERVER['AUTH_USER']['id'];
+            $userId  = $_SERVER['AUTH_USER']['id'];
+            $isAdmin = $this->isAdmin();
+            $pageId  = trim($_GET['page_id'] ?? '');
 
-            // 2️⃣ Validate page_id
-            $pageId = trim($_GET['page_id'] ?? '');
-            
             if (empty($pageId)) {
                 http_response_code(422);
                 echo json_encode(['message' => 'Page ID required']);
@@ -507,51 +399,93 @@ class HtmlPageController
 
             $db = Database::connect();
 
-            // 3️⃣ Fetch page with user verification
-            $stmt = $db->prepare("
-                SELECT id, user_id, vendor_id, slug, 
-                       html_content, seo_title, seo_description, 
-                       status, screenshot_image, created_at, updated_at
-                FROM html_pages 
-                WHERE id = :page_id AND user_id = :user_id
-            ");
-            
-            $stmt->execute([
-                'page_id' => $pageId,
-                'user_id' => $userId
-            ]);
-            
-            $page = $stmt->fetch();
+            $sql    = $isAdmin
+                ? "SELECT id, user_id, vendor_id, slug, html_content, seo_title, seo_description,
+                          craft_state, status, screenshot_image, created_at, updated_at
+                   FROM html_pages WHERE id = :page_id"
+                : "SELECT id, user_id, vendor_id, slug, html_content, seo_title, seo_description,
+                          craft_state, status, screenshot_image, created_at, updated_at
+                   FROM html_pages WHERE id = :page_id AND user_id = :user_id";
+            $params = $isAdmin
+                ? ['page_id' => $pageId]
+                : ['page_id' => $pageId, 'user_id' => $userId];
 
-            // 4️⃣ Check if page exists and belongs to user
+            $stmt = $db->prepare($sql);
+            $stmt->execute($params);
+            $page = $stmt->fetch(PDO::FETCH_ASSOC);
+
             if (!$page) {
                 http_response_code(404);
                 echo json_encode(['message' => 'Page not found or access denied']);
                 return;
             }
 
-            // 5️⃣ Return page content
             http_response_code(200);
-            echo json_encode([
-                'success' => true,
-                'page' => $page
-            ]);
+            echo json_encode(['success' => true, 'page' => $page]);
 
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("Get page content error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
         }
     }
 
-    /**
-     * Upload image for page content (authenticated)
-     * Returns the image URL/path that can be used in HTML content
-     */
-    public function uploadImage(): void
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET PAGE BY SLUG  (public)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public function getPage(): void
     {
         try {
-            // 1️⃣ Check authentication
+            $slug = trim($_GET['slug'] ?? '');
+
+            if (empty($slug)) {
+                http_response_code(422);
+                echo json_encode(['message' => 'Slug required']);
+                return;
+            }
+
+            $db   = Database::connect();
+            $stmt = $db->prepare("
+                SELECT id, user_id, vendor_id, slug, html_content,
+                       seo_title, seo_description, status, screenshot_image
+                FROM html_pages
+                WHERE slug = :slug AND status IN ('published', 'pending')
+            ");
+            $stmt->execute(['slug' => $slug]);
+            $page = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$page) {
+                http_response_code(404);
+                echo json_encode(['message' => 'Page not found']);
+                return;
+            }
+
+            http_response_code(200);
+            echo json_encode(['success' => true, 'page' => $page]);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LIST OWN PAGES  (authenticated user)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public function listPages(): void
+    {
+        try {
             if (!isset($_SERVER['AUTH_USER'])) {
                 http_response_code(401);
                 echo json_encode(['message' => 'Authentication required']);
@@ -559,24 +493,189 @@ class HtmlPageController
             }
 
             $userId = $_SERVER['AUTH_USER']['id'];
+            $db     = Database::connect();
 
-            // 2️⃣ Validate page_id (optional - to verify user owns the page)
-            $pageId = trim($_POST['page_id'] ?? '');
-            
+            $stmt = $db->prepare("
+                SELECT id, vendor_id, slug, seo_title, status,
+                       screenshot_image, created_at, updated_at
+                FROM html_pages
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+            ");
+            $stmt->execute(['user_id' => $userId]);
+            $pages = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            http_response_code(200);
+            echo json_encode([
+                'success' => true,
+                'pages'   => $pages,
+                'count'   => count($pages),
+            ]);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LIST ALL PAGES  (admin only)
+    // ─────────────────────────────────────────────────────────────────────────
+
+ public function listAllPages(): void
+    {
+        try {
+            if (!isset($_SERVER['AUTH_USER'])) {
+                http_response_code(401);
+                echo json_encode(['message' => 'Authentication required']);
+                return;
+            }
+
+            if (!$this->isAdmin()) {
+                http_response_code(403);
+                echo json_encode(['message' => 'Admin access required']);
+                return;
+            }
+
+            $db            = Database::connect();
+            $status        = trim($_GET['status'] ?? '');
+            $type          = trim($_GET['type'] ?? ''); // NEW: type filter
+            $validStatuses = ['draft', 'pending', 'published', 'blocked', 'archived'];
+            $whereClauses  = [];
+            $params        = [];
+
+            if (!empty($status) && in_array($status, $validStatuses)) {
+                $whereClauses[] = 'p.status = :status';
+                $params['status'] = $status;
+            }
+
+            // NEW: type filtering
+            if (!empty($type)) {
+                $whereClauses[] = 'p.type = :type';
+                $params['type'] = $type;
+            }
+
+            $whereClause = !empty($whereClauses) ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
+
+            $stmt = $db->prepare("
+                SELECT
+                    p.id,
+                    p.slug,
+                    p.type, -- NEW: include type
+                    p.seo_title,
+                    p.seo_description,
+                    p.status,
+                    p.screenshot_image,
+                    p.created_at,
+                    p.updated_at,
+
+                    u.id                                   AS user_id,
+                    CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+                    u.email                                AS user_email,
+                    u.phone_number                         AS user_phone,
+
+                    v.id                                   AS vendor_id,
+                    v.business_name                        AS vendor_business_name,
+                    v.business_type                        AS vendor_business_type,
+                    v.no_of_ads                            AS vendor_ad_limit,
+                    v.status                               AS vendor_status
+
+                FROM html_pages p
+                LEFT JOIN users   u ON u.id      = p.user_id
+                LEFT JOIN vendors v ON v.user_id = p.user_id
+
+                {$whereClause}
+                ORDER BY p.created_at DESC
+            ");
+
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $pages = array_map(function (array $row): array {
+                return [
+                    'id'               => $row['id'],
+                    'slug'             => $row['slug'],
+                    'type'             => $row['type'], // NEW: include type
+                    'seo_title'        => $row['seo_title'],
+                    'seo_description'  => $row['seo_description'],
+                    'status'           => $row['status'],
+                    'screenshot_image' => $row['screenshot_image'],
+                    'created_at'       => $row['created_at'],
+                    'updated_at'       => $row['updated_at'],
+                    'user' => [
+                        'id'    => $row['user_id'],
+                        'name'  => $row['user_name'],
+                        'email' => $row['user_email'],
+                        'phone' => $row['user_phone'],
+                    ],
+                    'vendor' => $row['vendor_id'] ? [
+                        'id'            => $row['vendor_id'],
+                        'business_name' => $row['vendor_business_name'],
+                        'business_type' => $row['vendor_business_type'],
+                        'ad_limit'      => $row['vendor_ad_limit'],
+                        'status'        => $row['vendor_status'],
+                    ] : null,
+                ];
+            }, $rows);
+
+            http_response_code(200);
+            echo json_encode([
+                'success' => true,
+                'pages'   => $pages,
+                'count'   => count($pages),
+                // NEW: filter info
+                'filters_applied' => [
+                    'status' => $status ?: null,
+                    'type'   => $type ?: null,
+                ],
+            ]);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UPLOAD IMAGE  (admin bypasses ownership check)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public function uploadImage(): void
+    {
+        try {
+            if (!isset($_SERVER['AUTH_USER'])) {
+                http_response_code(401);
+                echo json_encode(['message' => 'Authentication required']);
+                return;
+            }
+
+            $userId  = $_SERVER['AUTH_USER']['id'];
+            $isAdmin = $this->isAdmin();
+            $pageId  = trim($_POST['page_id'] ?? '');
+
             if (!empty($pageId)) {
                 $db = Database::connect();
-                
-                // Verify page ownership
-                $checkStmt = $db->prepare("
-                    SELECT id 
-                    FROM html_pages 
-                    WHERE id = :page_id AND user_id = :user_id
-                ");
-                $checkStmt->execute([
-                    'page_id' => $pageId,
-                    'user_id' => $userId
-                ]);
-                
+
+                $checkSql    = $isAdmin
+                    ? "SELECT id FROM html_pages WHERE id = :page_id"
+                    : "SELECT id FROM html_pages WHERE id = :page_id AND user_id = :user_id";
+                $checkParams = $isAdmin
+                    ? ['page_id' => $pageId]
+                    : ['page_id' => $pageId, 'user_id' => $userId];
+
+                $checkStmt = $db->prepare($checkSql);
+                $checkStmt->execute($checkParams);
+
                 if (!$checkStmt->fetch()) {
                     http_response_code(404);
                     echo json_encode(['message' => 'Page not found or access denied']);
@@ -584,35 +683,101 @@ class HtmlPageController
                 }
             }
 
-            // 3️⃣ Validate image file
             if (!isset($_FILES['image']) || $_FILES['image']['error'] === UPLOAD_ERR_NO_FILE) {
                 http_response_code(422);
                 echo json_encode(['message' => 'No image file provided']);
                 return;
             }
 
-            // 4️⃣ Handle image upload
             $imagePath = $this->handleImageUpload($_FILES['image']);
-            
+
             if ($imagePath === null) {
                 http_response_code(422);
                 echo json_encode(['message' => 'Invalid or failed image upload']);
                 return;
             }
 
-            // 5️⃣ Return image URL
             http_response_code(200);
             echo json_encode([
-                'success' => true,
-                'message' => 'Image uploaded successfully',
+                'success'    => true,
+                'message'    => 'Image uploaded successfully',
                 'image_path' => $imagePath,
-                'image_url' => "{$imagePath}"
+                'image_url'  => $imagePath,
             ]);
 
         } catch (Exception $e) {
             http_response_code(500);
-            error_log("Upload image error: " . $e->getMessage());
-            echo json_encode(['message' => 'Internal server error']);
+            echo json_encode([
+                'message' => 'Internal server error',
+                'error'   => $e->getMessage(),
+                'file'    => $e->getFile(),
+                'line'    => $e->getLine(),
+            ]);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRIVATE HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private function handleImageUpload(array $file): ?string
+    {
+        $uploadDir = __DIR__ . '/../../uploads/';
+        if (!is_dir($uploadDir)) {
+            mkdir($uploadDir, 0755, true);
+        }
+
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            error_log("Upload error: " . $file['error']);
+            return null;
+        }
+
+        if ($file['size'] > 5 * 1024 * 1024) {
+            error_log("File too large: " . $file['size']);
+            return null;
+        }
+
+        $finfo    = finfo_open(FILEINFO_MIME_TYPE);
+        $mimeType = finfo_file($finfo, $file['tmp_name']);
+        finfo_close($finfo);
+
+        if (!in_array($mimeType, ['image/jpeg', 'image/png', 'image/webp'])) {
+            error_log("Invalid file type: {$mimeType}");
+            return null;
+        }
+
+        $ext      = pathinfo($file['name'], PATHINFO_EXTENSION);
+        $filename = $this->generateUuid() . '.' . $ext;
+
+        if (move_uploaded_file($file['tmp_name'], $uploadDir . $filename)) {
+            return $filename;
+        }
+
+        error_log("Failed to move uploaded file");
+        return null;
+    }
+
+    private function generateUniqueSlug(PDO $pdo, string $baseSlug): string
+    {
+        $slug = trim(preg_replace('/[^a-z0-9]+/', '-', strtolower($baseSlug)), '-');
+
+        if (empty($slug)) {
+            $slug = 'page-' . time();
+        }
+
+        $checkStmt = $pdo->prepare("SELECT id FROM html_pages WHERE slug = :slug");
+        $checkStmt->execute(['slug' => $slug]);
+
+        if (!$checkStmt->fetch()) {
+            return $slug;
+        }
+
+        $counter = 1;
+        do {
+            $uniqueSlug = $slug . '-' . $counter++;
+            $checkStmt->execute(['slug' => $uniqueSlug]);
+        } while ($checkStmt->fetch());
+
+        return $uniqueSlug;
     }
 }

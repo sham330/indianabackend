@@ -77,7 +77,7 @@ public function getVendor(): void
 
         // 3️⃣ Get HTML pages where user_id matches id (only id, seo_title, status)
         $pagesStmt = $db->prepare("
-            SELECT id, seo_title, status 
+            SELECT id, seo_title, status,screenshot_image 
             FROM html_pages 
             WHERE user_id = :user_id
         ");
@@ -111,7 +111,9 @@ public function getVendor(): void
                 return [
                     'id' => $page['id'],
                     'seo_title' => $page['seo_title'],
-                    'status' => $page['status']
+                    'status' => $page['status'],
+                    'screenshot_image' => $page['screenshot_image'] ? "{$page['screenshot_image']}" : null
+
                 ];
             }, $pages)
         ]);

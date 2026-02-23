@@ -23,25 +23,32 @@ class BlogController
                 return;
             }
 
-            $input = json_decode(file_get_contents('php://input'), true);
+            // Handle multipart/form-data for image upload
+            $title = trim($_POST['title'] ?? '');
+            $content = trim($_POST['content'] ?? '');
             
-            if (json_last_error() !== JSON_ERROR_NONE || 
-                empty($input['title']) || 
-                empty($input['content'])) {
+            if (empty($title) || empty($content)) {
                 http_response_code(422);
                 echo json_encode(['message' => 'Title and content required']);
                 return;
             }
 
-            $title = trim($input['title']);
             $slug = $this->generateSlug($title);
-            $content = trim($input['content']);
-            $featuredImage = trim($input['featured_image'] ?? '');
-            $status = in_array($input['status'] ?? 'draft', ['draft', 'published', 'archived']) 
-                ? $input['status'] 
+            $type = trim($_POST['type'] ?? 'business');
+            $status = in_array($_POST['status'] ?? 'draft', ['draft', 'published', 'archived']) 
+                ? $_POST['status'] 
                 : 'draft';
-            $seoTitle = trim($input['seo_title'] ?? $title);
-            $seoDescription = trim($input['seo_description'] ?? '');
+            $seoTitle = trim($_POST['seo_title'] ?? $title);
+            $seoDescription = trim($_POST['seo_description'] ?? '');
+
+            // Handle featured image upload
+            $featuredImage = '';
+            if (isset($_FILES['featured_image']) && $_FILES['featured_image']['error'] !== UPLOAD_ERR_NO_FILE) {
+                $uploadedFile = $this->handleImageUpload($_FILES['featured_image']);
+                if ($uploadedFile) {
+                    $featuredImage = $uploadedFile;
+                }
+            }
 
             $db = Database::connect();
 
@@ -57,12 +64,13 @@ class BlogController
 
             // 3️⃣ Insert blog post
             $stmt = $db->prepare("
-                INSERT INTO blogs (title, slug, content, featured_image, status, seo_title, seo_description) 
-                VALUES (:title, :slug, :content, :featured_image, :status, :seo_title, :seo_description)
+                INSERT INTO blogs (title, type, slug, content, featured_image, status, seo_title, seo_description) 
+                VALUES (:title, :type, :slug, :content, :featured_image, :status, :seo_title, :seo_description)
             ");
             
             $result = $stmt->execute([
                 'title' => $title,
+                'type' => $type,
                 'slug' => $slug,
                 'content' => $content,
                 'featured_image' => $featuredImage,
@@ -83,7 +91,8 @@ class BlogController
                     'id' => $db->lastInsertId(),
                     'title' => $title,
                     'slug' => $slug,
-                    'status' => $status
+                    'status' => $status,
+                    'featured_image' => $featuredImage
                 ]
             ]);
 
@@ -123,7 +132,7 @@ class BlogController
             }
 
             $query = "
-                SELECT id, title, slug, featured_image, status, seo_title, 
+                SELECT id, title, type, slug, featured_image, status, seo_title, 
                        published_at, created_at, updated_at
                 FROM blogs 
                 $whereClause 
@@ -215,6 +224,7 @@ class BlogController
         }
     }
 
+
     /**
      * Update blog post (ADMIN ONLY)
      */
@@ -228,48 +238,97 @@ class BlogController
                 return;
             }
 
-            $input = json_decode(file_get_contents('php://input'), true);
+            // Parse PUT request with multipart/form-data
+            $_PUT = [];
+            $_FILES_PUT = [];
             
-            if (json_last_error() !== JSON_ERROR_NONE || 
-                empty($input['id']) || 
-                empty($input['title']) || 
-                empty($input['content'])) {
+            $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+            
+            if (strpos($contentType, 'multipart/form-data') !== false) {
+                // Parse multipart data for PUT
+                $rawData = file_get_contents('php://input');
+                $boundary = substr($rawData, 0, strpos($rawData, "\r\n"));
+                $parts = array_slice(explode($boundary, $rawData), 1);
+                
+                foreach ($parts as $part) {
+                    if ($part == "--\r\n") break;
+                    if (empty($part)) continue;
+                    
+                    list($rawHeaders, $body) = explode("\r\n\r\n", $part, 2);
+                    $body = substr($body, 0, -2);
+                    
+                    if (preg_match('/name="([^"]+)"(?:; filename="([^"]+)")?/', $rawHeaders, $matches)) {
+                        $name = $matches[1];
+                        $filename = $matches[2] ?? null;
+                        
+                        if ($filename) {
+                            // File upload
+                            $tmpPath = tempnam(sys_get_temp_dir(), 'php');
+                            file_put_contents($tmpPath, $body);
+                            
+                            preg_match('/Content-Type: (.+)/', $rawHeaders, $typeMatch);
+                            $_FILES_PUT[$name] = [
+                                'name' => $filename,
+                                'type' => $typeMatch[1] ?? 'application/octet-stream',
+                                'tmp_name' => $tmpPath,
+                                'error' => UPLOAD_ERR_OK,
+                                'size' => strlen($body)
+                            ];
+                        } else {
+                            $_PUT[$name] = $body;
+                        }
+                    }
+                }
+            }
+
+            $blogId = (int)($_GET['id'] ?? $_PUT['id'] ?? 0);
+            $title = trim($_PUT['title'] ?? '');
+            $content = trim($_PUT['content'] ?? '');
+            
+            if (!$blogId || empty($title) || empty($content)) {
                 http_response_code(422);
                 echo json_encode(['message' => 'Blog ID, title, and content required']);
                 return;
             }
 
-            $blogId = (int)$input['id'];
-            $title = trim($input['title']);
             $slug = $this->generateSlug($title);
-            $content = trim($input['content']);
-            $featuredImage = trim($input['featured_image'] ?? '');
-            $status = in_array($input['status'] ?? 'draft', ['draft', 'published', 'archived']) 
-                ? $input['status'] 
+            $type = trim($_PUT['type'] ?? 'business');
+            $status = in_array($_PUT['status'] ?? 'draft', ['draft', 'published', 'archived']) 
+                ? $_PUT['status'] 
                 : 'draft';
-            $seoTitle = trim($input['seo_title'] ?? $title);
-            $seoDescription = trim($input['seo_description'] ?? '');
+            $seoTitle = trim($_PUT['seo_title'] ?? $title);
+            $seoDescription = trim($_PUT['seo_description'] ?? '');
 
             $db = Database::connect();
 
-            // 2️⃣ Check blog exists
-            $checkStmt = $db->prepare("SELECT id FROM blogs WHERE id = :id");
+            // 2️⃣ Check blog exists and get current featured_image
+            $checkStmt = $db->prepare("SELECT featured_image FROM blogs WHERE id = :id");
             $checkStmt->execute(['id' => $blogId]);
+            $existingBlog = $checkStmt->fetch();
             
-            if (!$checkStmt->fetch()) {
+            if (!$existingBlog) {
                 http_response_code(404);
                 echo json_encode(['message' => 'Blog not found']);
                 return;
             }
 
+            // Handle featured image upload (keep existing if no new upload)
+            $featuredImage = $existingBlog['featured_image'];
+            if (isset($_FILES_PUT['featured_image']) && $_FILES_PUT['featured_image']['error'] === UPLOAD_ERR_OK) {
+                $uploadedFile = $this->handleImageUpload($_FILES_PUT['featured_image']);
+                if ($uploadedFile) {
+                    $featuredImage = $uploadedFile;
+                }
+            }
+
             // 3️⃣ Update blog (set published_at if status = published)
-            $extraFields = $status === 'published' && empty($input['published_at']) 
+            $extraFields = $status === 'published' && empty($_PUT['published_at']) 
                 ? ', published_at = CURRENT_TIMESTAMP' 
                 : '';
             
             $stmt = $db->prepare("
                 UPDATE blogs 
-                SET title = :title, slug = :slug, content = :content, 
+                SET title = :title, type = :type, slug = :slug, content = :content, 
                     featured_image = :featured_image, status = :status,
                     seo_title = :seo_title, seo_description = :seo_description {$extraFields}
                 WHERE id = :id
@@ -278,6 +337,7 @@ class BlogController
             $result = $stmt->execute([
                 'id' => $blogId,
                 'title' => $title,
+                'type' => $type,
                 'slug' => $slug,
                 'content' => $content,
                 'featured_image' => $featuredImage,
@@ -294,7 +354,8 @@ class BlogController
             echo json_encode([
                 'success' => true,
                 'message' => 'Blog post updated successfully',
-                'blog_id' => $blogId
+                'blog_id' => $blogId,
+                'featured_image' => $featuredImage
             ]);
 
         } catch (Exception $e) {
@@ -450,9 +511,9 @@ public function listPublishedBlogs(): void
             $params['date_to'] = $dateTo;
         }
 
-        // 4️⃣ Main query (title, content, created_at only)
+        // 4️⃣ Main query (title, type, content, created_at only)
         $query = "
-            SELECT id, title, slug, LEFT(content, 300) as excerpt, created_at
+            SELECT id, title, type, slug, featured_image, LEFT(content, 300) as excerpt, created_at
             FROM blogs 
             $whereClause 
             ORDER BY created_at DESC 
@@ -520,7 +581,7 @@ public function getBlogBySlug(): void
         
         // 1️⃣ Get ONLY PUBLISHED blog by slug
         $stmt = $db->prepare("
-            SELECT id, title, slug, content, featured_image, seo_title, seo_description, created_at
+            SELECT id, title, type, slug, content, featured_image, seo_title, seo_description, created_at
             FROM blogs 
             WHERE slug = :slug AND status = 'published'
         ");
@@ -539,6 +600,7 @@ public function getBlogBySlug(): void
             'blog' => [
                 'id' => $blog['id'],
                 'title' => $blog['title'],
+                'type' => $blog['type'],
                 'slug' => $blog['slug'],
                 'content' => $blog['content'],
                 'featured_image' => $blog['featured_image'],
@@ -569,12 +631,12 @@ public function getBlogBySlug(): void
     }
 
     /**
-     * Handle image upload and save to uploads/ folder
+     * Handle image upload and save to uploads/blogs/ folder
      */
     private function handleImageUpload(array $file): ?string
     {
-        // 1️⃣ Create uploads directory if not exists
-        $uploadDir = __DIR__ . '/../../uploads/';
+        // 1️⃣ Create uploads/blogs directory if not exists
+        $uploadDir = __DIR__ . '/../../uploads/blogs/';
         if (!is_dir($uploadDir)) {
             mkdir($uploadDir, 0755, true);
         }
