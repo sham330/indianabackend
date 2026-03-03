@@ -5,10 +5,12 @@ use src\Controllers\AdminAuthController;
 use src\Controllers\AdminVendorController;
 use src\Controllers\AuthController;
 use src\Controllers\BlogController;
+use src\Controllers\ContactusController;
 use src\Controllers\DashboardController;
 use src\Controllers\HtmlPageController;
 use src\Controllers\NewsletterController;
 use src\Controllers\PasswordResetController;
+use src\Controllers\PublicHtmlPageController;
 use src\Controllers\VendorController;
 
 /*
@@ -68,6 +70,9 @@ $router->delete('/pages/delete', [HtmlPageController::class, 'deletePage'], ['au
 $router->get('/admin/pages', [HtmlPageController::class, 'listAllPages'], ['auth', 'role:admin']);
 
 
+$router->get('/public/pages', [PublicHtmlPageController::class, 'listPublishedPages']); // List with filters + pagination
+$router->get('/public/pages/slug/{slug}', [PublicHtmlPageController::class, 'getPageBySlug']);
+$router->get('/public/home', [PublicHtmlPageController::class, 'getHomePageData']);
 
 // ✅ PUBLIC BLOG ENDPOINTS (No auth - Published only)
 $router->get('/blog', [BlogController::class, 'getBlogBySlug']);
@@ -103,3 +108,11 @@ $router->get('/admin/vendors/by-status', [AdminVendorController::class, 'getVend
 $router->post('/admin/vendor/update', [AdminVendorController::class, 'updateVendor'], ['auth', 'role:admin']);
 $router->post('/admin/vendor/status', [AdminVendorController::class, 'updateVendorStatus'], ['auth', 'role:admin']);
 $router->delete('/admin/vendor', [AdminVendorController::class, 'deleteVendor'], ['auth', 'role:admin']);
+
+// ✅ Contact Inquiries - PUBLIC POST + ADMIN CRUD
+$router->post('/contact-inquiries', [ContactusController::class, 'createInquiry']);  // Public
+$router->get('/admin/contact-inquiries', [ContactusController::class, 'listInquiries'], ['auth', 'role:admin']);
+$router->get('/admin/contact-inquiry', [ContactusController::class, 'getInquiry'], ['auth', 'role:admin']);
+$router->post('/admin/contact-inquiries/status', [ContactusController::class, 'updateInquiryStatus'], ['auth', 'role:admin']);
+$router->put('/admin/contact-inquiry', [ContactusController::class, 'updateInquiry'], ['auth', 'role:admin']);
+$router->delete('/admin/contact-inquiry', [ContactusController::class, 'deleteInquiry'], ['auth', 'role:admin']);
