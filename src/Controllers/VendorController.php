@@ -121,6 +121,112 @@ public function getVendor(): void
     } catch (Exception $e) {
         http_response_code(500);
         error_log("Get vendor error: " . $e->getMessage());
+        echo json_encode(value: ['message' => 'Internal server error']);
+    }
+}
+
+
+public function getVendorById(): void
+{
+    try {
+        // 1️⃣ AuthMiddleware already ran and set $_SERVER['AUTH_USER']
+        if (!isset($_SERVER['AUTH_USER'])) {
+            http_response_code(401);
+            echo json_encode(['message' => 'Authentication required']);
+            return;
+        }
+
+        $user = $_SERVER['AUTH_USER'];
+        $userId = $user['id'];
+        
+        // 2️⃣ Admin check - only admins can access other vendors
+        if (!isset($user['role']) || $user['role'] !== 'admin') {
+            http_response_code(403);
+            echo json_encode(['message' => 'Admin access required']);
+            return;
+        }
+
+        // 3️⃣ Get vendor ID from query parameter
+        $input = json_decode(file_get_contents('php://input'), true) ?: [];
+        $vendorId = $_GET['id'] ?? $input['id'] ?? null;
+        
+        if (!$vendorId) {
+            http_response_code(400);
+            echo json_encode(['message' => 'Vendor ID is required']);
+            return;
+        }
+
+        $db = Database::connect();
+
+        // 4️⃣ Get vendor details by vendor_id
+        $stmt = $db->prepare("
+            SELECT 
+                v.id, v.user_id, v.business_image, v.business_name, 
+                v.description, v.business_type, v.address, v.google_map_link, 
+                v.no_of_ads, v.status as vendor_status,
+                v.created_at, v.updated_at,
+                u.first_name, u.last_name, u.email
+            FROM vendors v
+            LEFT JOIN users u ON v.user_id = u.id
+            WHERE v.id = :vendor_id
+        ");
+        $stmt->execute(['vendor_id' => $vendorId]);
+        $vendor = $stmt->fetch();
+
+        if (!$vendor) {
+            http_response_code(404);
+            echo json_encode([
+                'success' => false, 
+                'message' => 'Vendor not found'
+            ]);
+            return;
+        }
+
+        // 5️⃣ Get HTML pages for this vendor's user_id
+        $pagesStmt = $db->prepare("
+            SELECT id, seo_title, status, screenshot_image 
+            FROM html_pages 
+            WHERE user_id = :user_id
+        ");
+        $pagesStmt->execute(['user_id' => $vendor['user_id']]);
+        $pages = $pagesStmt->fetchAll();
+
+        // 6️⃣ Format response
+        http_response_code(200);
+        echo json_encode([
+            'success' => true,
+            'vendor' => [
+                'id' => $vendor['id'],
+                'user_id' => $vendor['user_id'],
+                'business_name' => $vendor['business_name'],
+                'business_type' => $vendor['business_type'],
+                'description' => $vendor['description'],
+                'address' => $vendor['address'],
+                'ads' => $vendor['no_of_ads'],
+                'google_map_link' => $vendor['google_map_link'],
+                'business_image' => $vendor['business_image'] ? "{$vendor['business_image']}" : null,
+                'status' => $vendor['vendor_status'],
+                'created_at' => $vendor['created_at'],
+                'updated_at' => $vendor['updated_at'],
+                'user' => [
+                    'first_name' => $vendor['first_name'],
+                    'last_name' => $vendor['last_name'],
+                    'email' => $vendor['email']
+                ]
+            ],
+            'pages' => array_map(function($page) {
+                return [
+                    'id' => $page['id'],
+                    'seo_title' => $page['seo_title'],
+                    'status' => $page['status'],
+                    'screenshot_image' => $page['screenshot_image'] ? "{$page['screenshot_image']}" : null
+                ];
+            }, $pages)
+        ]);
+
+    } catch (Exception $e) {
+        http_response_code(500);
+        error_log("Get vendor by ID error: " . $e->getMessage());
         echo json_encode(['message' => 'Internal server error']);
     }
 }

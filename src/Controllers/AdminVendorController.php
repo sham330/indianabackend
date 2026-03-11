@@ -315,6 +315,67 @@ class AdminVendorController
     }
 
     /**
+     * Update vendor verification status (Admin only)
+     */
+    public function updateVendorVerification(): void
+    {
+        try {
+            if (!isset($_SERVER['AUTH_USER']) || $_SERVER['AUTH_USER']['role'] !== 'admin') {
+                http_response_code(403);
+                echo json_encode(['message' => 'Admin access required']);
+                return;
+            }
+
+            $input = json_decode(file_get_contents('php://input'), true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE || empty($input['vendor_id']) || !isset($input['is_verified'])) {
+                http_response_code(422);
+                echo json_encode(['message' => 'Vendor ID and is_verified required']);
+                return;
+            }
+
+            $vendorId = trim($input['vendor_id']);
+            $isVerified = (int)$input['is_verified'];
+
+            if (!in_array($isVerified, [0, 1])) {
+                http_response_code(422);
+                echo json_encode(['message' => 'is_verified must be 0 or 1']);
+                return;
+            }
+
+            $db = Database::connect();
+            $stmt = $db->prepare("
+                UPDATE vendors 
+                SET is_verified = :is_verified, updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id
+            ");
+            $result = $stmt->execute([
+                'is_verified' => $isVerified,
+                'id' => $vendorId
+            ]);
+
+            if (!$result || $stmt->rowCount() === 0) {
+                http_response_code(404);
+                echo json_encode(['message' => 'Vendor not found']);
+                return;
+            }
+
+            http_response_code(200);
+            echo json_encode([
+                'success' => true,
+                'message' => 'Vendor verification status updated',
+                'vendor_id' => $vendorId,
+                'is_verified' => $isVerified
+            ]);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            error_log("Update vendor verification error: " . $e->getMessage());
+            echo json_encode(['message' => 'Internal server error']);
+        }
+    }
+
+    /**
      * Delete vendor (Admin only)
      */
     public function deleteVendor(): void

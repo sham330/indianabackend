@@ -8,10 +8,12 @@ use src\Controllers\BlogController;
 use src\Controllers\ContactusController;
 use src\Controllers\DashboardController;
 use src\Controllers\HtmlPageController;
+use src\Controllers\HtmlPageMetadataController;
 use src\Controllers\NewsletterController;
 use src\Controllers\PasswordResetController;
 use src\Controllers\PublicHtmlPageController;
 use src\Controllers\VendorController;
+use src\Controllers\VendorNotificationController;
 
 /*
 |--------------------------------------------------------------------------
@@ -47,7 +49,7 @@ $router->post('/vendor/create', [VendorController::class, 'createVendor'], ['aut
 // ✅ GET Vendor Profile - Matches user_id via auth middleware
 $router->get('/vendor/profile', [VendorController::class, 'getVendor'], ['auth', 'role:vendor|admin']);
 $router->post('/vendor/update', [VendorController::class, 'updateVendor'],['auth', 'role:vendor|admin']);
-
+$router->get('/vendor/:id', [VendorController::class, 'getVendorById'], ['auth', 'role:admin']);
 
 
 // ✅ Public subscribe (no auth required)
@@ -68,6 +70,11 @@ $router->post('/pages/upload-image', [HtmlPageController::class, 'uploadImage'],
 $router->get('/pages/page', [HtmlPageController::class, 'getPage']); // Public endpoint
 $router->delete('/pages/delete', [HtmlPageController::class, 'deletePage'], ['auth', 'role:vendor|admin']);
 $router->get('/admin/pages', [HtmlPageController::class, 'listAllPages'], ['auth', 'role:admin']);
+
+// ✅ Html page metadata - VENDOR or ADMIN role only
+$router->put('/pages/metadata', [HtmlPageMetadataController::class, 'updateMetadata'], ['auth', 'role:vendor|admin']);
+$router->get('/pages/metadata', [HtmlPageMetadataController::class, 'getMetadata']);
+$router->post('/pages/increment-view', [HtmlPageMetadataController::class, 'incrementViewCount']);
 
 
 $router->get('/public/pages', [PublicHtmlPageController::class, 'listPublishedPages']); // List with filters + pagination
@@ -107,6 +114,8 @@ $router->get('/admin/vendor', [AdminVendorController::class, 'getVendor'], ['aut
 $router->get('/admin/vendors/by-status', [AdminVendorController::class, 'getVendorsByStatus'], ['auth', 'role:admin']);
 $router->post('/admin/vendor/update', [AdminVendorController::class, 'updateVendor'], ['auth', 'role:admin']);
 $router->post('/admin/vendor/status', [AdminVendorController::class, 'updateVendorStatus'], ['auth', 'role:admin']);
+$router->post('/admin/vendor/verification', [AdminVendorController::class, 'updateVendorVerification'], ['auth', 'role:admin']);
+$router->post('/admin/vendor/send-notification', [VendorNotificationController::class, 'sendStatusNotification'], ['auth', 'role:admin']);
 $router->delete('/admin/vendor', [AdminVendorController::class, 'deleteVendor'], ['auth', 'role:admin']);
 
 // ✅ Contact Inquiries - PUBLIC POST + ADMIN CRUD
